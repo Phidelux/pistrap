@@ -1,0 +1,296 @@
+#!/bin/sh
+
+set -e
+
+RASPI_WORKDIR=$(pwd)
+RASPI_MIRROR="https://downloads.raspberrypi.org/raspios_lite_armhf/images/"
+RASPI_MOUNTPOINT="/mnt"
+RASPI_USER="pi"
+RASPI_PASSWORD="raspberry"
+
+SCRIPT_NAME=$(basename "${0}")
+SCRIPT_VERSION="0.1"
+SCRIPT_USAGE=$(cat <<EOF
+Usage: ${SCRIPT_NAME} [-hv]
+
+Enables serial console and creates user in raspberry lite image.
+
+-h|--help:
+    Displays this help.
+--version:
+    Displays the current version of this script.
+-v|--verbose:
+    Display additional information.
+-i|--image:
+    Path to the Raspbian image file to flash.
+-l|--latest:
+    This will check upstream for the latest Raspbian Lite image, download and flash it.
+-m|--mountpoint:
+    Defines the mountpoint used to mount the Raspbian image.
+-z|--zipped:
+    The given image is gzipped and has to be extracted.
+-u|--username:
+    The sudo user name (default ${RASPI_USER}).
+-p|--password:
+    Password of sudo user (default ${RASPI_PASSWORD}).
+-s|--ssh:
+    Enable ssh for specified user.
+EOF
+)
+
+error() {
+    echo "Error: $*" 1>&2
+}
+
+info() {
+    if [ -n "${VERBOSE_INFO}" ]; then
+        echo "Info: $*" 1>&2
+    fi
+}
+
+usage() {
+    rc=0
+
+    if [ -n "${1}" ]; then
+        rc="${1}"
+    fi
+
+    if [ -n "${2}" ]; then
+        error "${2}"
+    fi
+
+    echo "${SCRIPT_USAGE}"
+
+    exit "${rc}"
+}
+
+has_value() {
+    if [ -n "${1}" ] && ! case "${1}" in -*) true;; *) false;; esac; then
+        return 0
+    fi
+
+    return 1
+}
+
+yesno()
+{
+    if [ ! "$*" ]; then
+        error "Missing question"
+    fi
+
+    while [ -z "${OK}" ]; do
+        printf "%s" "$*" >&2
+        read -r ANS
+        if [ -z "${ANS}" ]; then
+            ANS="n"
+        else
+            ANS=$(tr '[:upper:]' '[:lower:]' << EOF
+${ANS}
+EOF
+            )
+        fi
+
+        if [ "${ANS}" = "y" ] || [ "${ANS}" = "yes" ] || [ "${ANS}" = "n" ] || [ "${ANS}" = "no" ]; then
+            OK=1
+        fi
+
+        if [ -z "${OK}" ]; then
+            warning "Valid answers are: yes/no"
+        fi
+    done
+
+    [ "${ANS}" = "y" ] || [ "${ANS}" = "yes" ]
+}
+
+find_latest() {
+    RASPI_LATEST_PATH=$(curl -k -L "${RASPI_MIRROR}"  2>/dev/null \
+        | sed -n "s/.*href=\"\([^0-9]*[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p" \
+        | sort -n -t"-" -k2 -k3 -k4 -r \
+        | head -n1
+    )
+    RASPI_LATEST_IMAGE=$(curl -k -L "${RASPI_MIRROR}/${RASPI_LATEST_PATH}/" 2>/dev/null \
+        | sed -n "s/.*href=\"\([^\"]*\.img[\.xz]\{0,3\}\)\".*/\1/p"
+    )
+    printf "%s/%s/%s" "${RASPI_MIRROR}" "${RASPI_LATEST_PATH}" "${RASPI_LATEST_IMAGE}"
+}
+
+if [ $(id -u) -ne 0 ]; then
+    usage 1 "Script has to be run with root privilegues in order to write to the SD card."
+fi
+
+while [ -n "${1+xxx}" ]; do
+    case "${1}" in
+        --help|-h)
+            usage
+            ;;
+        --version)
+            echo "${SCRIPT_NAME} v${SCRIPT_VERSION}"
+            exit 0
+            ;;
+        --verbose|-v)
+            VERBOSE_INFO=1
+            ;;
+        -w|--workdir)
+            if has_value "${2}"; then
+                RASPI_WORKDIR="${2}"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        -i|--image)
+            if [ -n "${RASPI_IMAGE_NAME}" ]; then
+                usage 1 "Raspberry pi image already specified. Please do not combine -l and -i options."
+            fi
+
+            if has_value "${2}"; then
+                RASPI_IMAGE_PATH="${2}"
+                RASPI_IMAGE_NAME="$(basename "${2}")"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        -l|--latest)
+            if [ -n "${RASPI_IMAGE_NAME}" ]; then
+                usage 1 "Raspberry pi image already specified. Please do not combine -l and -i options."
+            fi
+
+            RASPI_IMAGE_URL="$(find_latest)"
+            RASPI_IMAGE_NAME="$(basename "${RASPI_IMAGE_URL}")"
+            ;;
+        -z|--zipped)
+            RASPI_ZIPPED=1
+            ;;
+        -m|--mountpoint)
+            if has_value "${2}"; then
+                RASPI_MOUNTPOINT="${2}"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        -u|--username)
+            if has_value "${2}"; then
+                RASPI_USER="${2}"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        -p|--password)
+            if has_value "${2}"; then
+                RASPI_PASSWORD="${2}"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        -s|--ssh)
+            RASPI_SSH=1
+            ;;
+        -f|--flash)
+            if has_value "${2}"; then
+                RASPI_FLASH_TARGET="${2}"
+                shift
+            else
+                usage 1 "Missing value for option ${1}."
+            fi
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            usage 1 "Unrecognized option ${1}."
+            ;;
+        *)
+            break
+            ;;
+    esac
+
+    shift
+done
+
+if [ -z "${RASPI_IMAGE_NAME}" ]; then
+    usage 1 "Raspberry pi image has to be specified using option --image or --latest."
+fi
+
+if ! [ -d "${RASPI_WORKDIR}" ]; then
+    info "Creating working directory ${RASPI_WORKDIR} ..."
+    mkdir -p "${RASPI_WORKDIR}"
+fi
+
+if [ -n "${RASPI_IMAGE_URL}" ]; then
+    RASPI_IMAGE_PATH="${RASPI_WORKDIR}/${RASPI_IMAGE_NAME}"
+    info "Downloading Raspbian lite image ${RASPI_IMAGE_URL} ..."
+    curl -L -k -o "${RASPI_IMAGE_PATH}" "${RASPI_IMAGE_URL}"
+fi
+
+if ! [ -f "${RASPI_IMAGE_PATH}" ]; then
+    usage 1 "Raspbian lite image file ${RASPI_IMAGE_PATH} does not exist."
+fi
+
+if [ -n "${RASPI_ZIPPED}" ]; then
+    info "Extracting compressed image ${RASPI_IMAGE_NAME} to ${RASPI_IMAGE_NAME%%.xz}"
+    unxz --keep --stdout --quiet "${RASPI_IMAGE_PATH}" > "${RASPI_WORKDIR}/${RASPI_IMAGE_NAME%%.xz}"
+    RASPI_IMAGE_NAME="${RASPI_IMAGE_NAME%%.xz}"
+    RASPI_IMAGE_PATH="${RASPI_WORKDIR}/${RASPI_IMAGE_NAME}"
+fi
+
+if ! [ -d "${RASPI_MOUNTPOINT}" ]; then
+    info "Creating mount point ${RASPI_MOUNTPOINT} ..."
+    mkdir -p "${RASPI_MOUNTPOINT}"
+fi
+
+info "Mounting Raspbian lite image boot partition ${RASPI_IMAGE_NAME} to ${RASPI_MOUNTPOINT} ..."
+RASPI_IMAGE_OFFSET=$( \
+    partx --output=START --raw "${RASPI_IMAGE_PATH}" \
+        | tail -n +2 \
+        | head -n1
+)
+RASPI_IMAGE_OFFSET=$((RASPI_IMAGE_OFFSET * 512))
+RASPI_IMAGE_SIZE=$( \
+    partx -b --output=SIZE --raw "${RASPI_IMAGE_PATH}" \
+        | tail -n +2 \
+        | head -n1
+)
+info "mount -v -o \"offset=${RASPI_IMAGE_OFFSET},sizelimit=${RASPI_IMAGE_SIZE}\" -t vfat \"${RASPI_IMAGE_PATH}\" \"${RASPI_MOUNTPOINT}\""
+mount -v -o "offset=${RASPI_IMAGE_OFFSET},sizelimit=${RASPI_IMAGE_SIZE}" -t vfat "${RASPI_IMAGE_PATH}" "${RASPI_MOUNTPOINT}"
+
+if ! [ -f  "${RASPI_MOUNTPOINT}/config.txt" ]; then
+    error "Raspberry Pi config ${RASPI_MOUNTPOINT}/config.txt does not exist ..."
+    exit 1
+fi
+
+info "Enabling UART on the Raspberry Pi ..."
+echo "enable_uart=1" >> "${RASPI_MOUNTPOINT}/config.txt"
+
+info "Setting username and password ..."
+printf "%s:" "${RASPI_USER}" > "${RASPI_MOUNTPOINT}/userconf"
+printf "%s" "${RASPI_PASSWORD}" | openssl passwd -6 -stdin >> "${RASPI_MOUNTPOINT}/userconf"
+
+if [ -n "${RASPI_SSH}" ]; then
+    info "Enabling ssh access for user ${RASPI_USER} ..."
+    touch "${RASPI_MOUNTPOINT}/ssh"
+fi
+
+info "Unmounting Rasbian lite image ..."
+umount "${RASPI_MOUNTPOINT}"
+
+if [ -n "${RASPI_FLASH_TARGET}" ]; then
+    if ! [ -b "${RASPI_FLASH_TARGET}" ]; then
+        usage 1 "${RASPI_FLASH_TARGET} is not a path to an existing block device."
+    fi
+
+    if ! yesno "Are you sure you would like to flash ${RASPI_IMAGE_NAME} to ${RASPI_FLASH_TARGET} (default no) ? "; then
+        info "Aborting."
+        exit 0
+    fi
+
+    info "Flashing ${RASPI_IMAGE_NAME} to ${RASPI_FLASH_TARGET} ..."
+    dd if="${RASPI_IMAGE_PATH}" of="${RASPI_FLASH_TARGET}" status=progress
+fi
+
+info "Done."
+

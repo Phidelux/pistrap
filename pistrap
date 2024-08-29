@@ -39,12 +39,12 @@ EOF
 )
 
 error() {
-    echo "Error: $*" 1>&2
+    printf "Error: %s \n" "$*" 1>&2
 }
 
 info() {
     if [ -n "${VERBOSE_INFO}" ]; then
-        echo "Info: $*" 1>&2
+        printf "Info: %s\n" "$*" 1>&2
     fi
 }
 
@@ -105,7 +105,7 @@ EOF
 find_latest() {
     RASPI_LATEST_PATH=$(curl -k -L "${RASPI_MIRROR}"  2>/dev/null \
         | sed -n "s/.*href=\"\([^0-9]*[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p" \
-        | sort -n -t"-" -k2 -k3 -k4 -r \
+        | sort -fiVr \
         | head -n1
     )
     RASPI_LATEST_IMAGE=$(curl -k -L "${RASPI_MIRROR}/${RASPI_LATEST_PATH}/" 2>/dev/null \
@@ -114,11 +114,11 @@ find_latest() {
     printf "%s/%s/%s" "${RASPI_MIRROR}" "${RASPI_LATEST_PATH}" "${RASPI_LATEST_IMAGE}"
 }
 
-if [ $(id -u) -ne 0 ]; then
+if [ "$(id -u)" -ne 0 ]; then
     usage 1 "Script has to be run with root privilegues in order to write to the SD card."
 fi
 
-while [ -n "${1+xxx}" ]; do
+while :; do
     case "${1}" in
         --help|-h)
             usage
@@ -197,11 +197,7 @@ while [ -n "${1+xxx}" ]; do
                 usage 1 "Missing value for option ${1}."
             fi
             ;;
-        --)
-            shift
-            break
-            ;;
-        -*)
+        -?*)
             usage 1 "Unrecognized option ${1}."
             ;;
         *)
